@@ -59,18 +59,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-godot-android-
 
-      - name: Build Android Export Templates (Release & Debug)
+      - name: Build Android Export Templates (Release & Debug, arm64 + arm32)
         run: |
           cd godot
-          # بناء نسخة الـ Release لـ arm64 (الأكثر شيوعاً للهواتف الحديثة)
+
           echo "Building Android arm64 Release template..."
           scons platform=android target=template_release arch=arm64 -j2
-          
-          # بناء نسخة الـ Debug لـ arm64
+
           echo "Building Android arm64 Debug template..."
           scons platform=android target=template_debug arch=arm64 -j2
-          
-          # ملاحظة: إذا أردت دعم x86_64 للمحاكيات، يجب تكرار الأوامر مع تغيير arch=x86_64
+
+          echo "Building Android arm32 Release template..."
+          scons platform=android target=template_release arch=arm32 -j2
+
+          echo "Building Android arm32 Debug template..."
+          scons platform=android target=template_debug arch=arm32 -j2
+
           cd ..
 
       - name: Generate Android AAR Library
@@ -85,18 +89,18 @@ jobs:
           # نقل ملفات الـ AAR والـ APK الناتجة
           cp godot/bin/*.apk android_export_templates/ 2>/dev/null || true
           cp godot/bin/*.aar android_export_templates/ 2>/dev/null || true
-          
+
           cat > android_export_templates/README.txt << 'EOF'
           Android Export Templates for Godot
           ==================================
           Built with AES-256 encryption.
-          Architectures: arm64-v8a
-          
+          Architectures: arm64-v8a, armeabi-v7a
+
           To use:
           1. Copy the .aar files to your project's 'android/build/libs' if using custom builds.
           2. Or install through the Godot Editor 'Install from file' menu.
           EOF
-          
+
           (cd android_export_templates && zip -9 -r ../android_export_templates.zip .)
 
       - name: Upload Android templates artifact
