@@ -30,8 +30,12 @@ jobs:
 
       - name: Clone latest stable Godot source into ./godot
         run: |
-          curl -s https://api.github.com/repos/godotengine/godot/releases/latest \
-            | grep "tag_name" | cut -d '"' -f4 | xargs -I {} git clone --depth 1 --branch {} https://github.com/godotengine/godot.git godot
+          # أحدث tag مستقر بدون GitHub API (الـ API يرفض أحيانا بسبب rate limit فيرجع TAG فاضي)
+          TAG=$(git ls-remote --tags --refs https://github.com/godotengine/godot.git '*-stable' | awk -F/ '{print $3}' | sort -V | tail -n1)
+          echo "Latest stable tag: $TAG"
+          test -n "$TAG"
+          echo "GODOT_TAG=$TAG" >> $GITHUB_ENV
+          git clone --depth 1 --branch "$TAG" https://github.com/godotengine/godot.git godot
       - name: Create local secure AES script
         run: |
           cat << 'EOF' > aes_secure.py
@@ -58,9 +62,15 @@ jobs:
           sudo update-alternatives --install /usr/bin/x86_64-w64-mingw32-gcc x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix 100
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
-          # Install Android NDK and CMake if platform is android
           if [ "${{ matrix.platform }}" = "android" ]; then
-            echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;23.2.8568313" "cmake;3.22.1"
+          NDK_VER=$(grep -oP "ndkVersion\s*:\s*'\K[^']+" godot/platform/android/java/app/config.gradle)
+          BT_VER=$(grep -oP "buildTools\s*:\s*'\K[^']+" godot/platform/android/java/app/config.gradle)
+          SDK_VER=$(grep -oP "compileSdk\s*:\s*\K[0-9]+" godot/platform/android/java/app/config.gradle)
+          echo "NDK=$NDK_VER BuildTools=$BT_VER SDK=$SDK_VER"
+          test -n "$NDK_VER"
+          yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${NDK_VER}" "cmake;3.22.1" "build-tools;${BT_VER}" "platforms;android-${SDK_VER}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/${NDK_VER}" >> $GITHUB_ENV
           fi
       - name: Build Windows Editor
         if: matrix.platform == 'windows-editor'
