@@ -89,17 +89,15 @@ jobs:
           echo "Building Linux Debug Template..."
           scons platform=linuxbsd target=template_debug arch=x86_64 tools=no -j4
           cd ..
-      - name: Build Android Export Templates & AAR
+      - name: Build Android Export Templates (arm32 + arm64)
         if: matrix.platform == 'android'
         run: |
           cd godot
-          echo "Building Android arm64 Release & Debug templates..."
+          scons platform=android target=template_release arch=arm32 -j4
+          scons platform=android target=template_debug arch=arm32 -j4
           scons platform=android target=template_release arch=arm64 -j4
-          scons platform=android target=template_debug arch=arm64 -j4
-          
-          cd platform/android/java
-          ./gradlew generateGodotTemplates
-          cd ../../../../
+          scons platform=android target=template_debug arch=arm64 -j4 generate_android_binaries=yes
+          cd ..
       - name: Package Artifacts
         run: |
           mkdir -p final_output
@@ -117,8 +115,7 @@ jobs:
             (cd final_output/linux && zip -9 -r ../linux_templates.zip .)
           elif [ "${{ matrix.platform }}" = "android" ]; then
             mkdir -p final_output/android
-            cp godot/bin/*.apk final_output/android/ 2>/dev/null || true
-            cp godot/bin/*.aar final_output/android/ 2>/dev/null || true
+            cp godot/bin/android_*.apk godot/bin/android_source.zip final_output/android/ 2>/dev/null || true
             (cd final_output/android && zip -9 -r ../android_templates.zip .)
           fi
       - name: Upload Artifacts
