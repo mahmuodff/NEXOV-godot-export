@@ -8,9 +8,9 @@ on:
 jobs:
   build_android_templates:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
       SCONSFLAGS: verbose=yes warnings=all use_lto=yes
-      # استبدل هذا بالمسار الصحيح للـ SDK في Ubuntu runner
       ANDROID_HOME: /usr/local/lib/android/sdk
       SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.SCRIPT_AES256_ENCRYPTION_KEY }}
 
@@ -19,15 +19,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java (Required for Android)
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
       - name: Clone latest stable Godot source into ./godot
         run: |
-          curl -s https://api.github.com/repos/godotengine/godot/releases/latest \
-            | grep "tag_name" | cut -d '"' -f4 | xargs -I {} git clone --depth 1 --branch {} https://github.com/godotengine/godot.git godot
+          TAG=$(curl -s https://api.github.com/repos/godotengine/godot/releases/latest | grep '"tag_name"' | cut -d '"' -f4)
+          echo "GODOT_TAG=$TAG" >> $GITHUB_ENV
+          git clone --depth 1 --branch "$TAG" https://github.com/godotengine/godot.git godot
 
       - name: Download AES-256 secure script
         run: |
@@ -46,61 +47,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential scons pkg-config python3 zip unzip curl git
-          # تثبيت الـ NDK المطلوب (إصدار 23b أو أحدث متوافق مع Godot 4)
-          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;23.2.8568313" "cmake;3.22.1"
+          # اقرأ إصدار الـ NDK المطلوب مباشرة من سورس جودوت (يتغير بين الإصدارات)
+          NDK_VER=$(grep -oP 'ndkVersion\s*=\s*"\K[^"]+' godot/platform/android/java/app/config.gradle || echo "23.2.8568313")
+          echo "Using NDK $NDK_VER"
+          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${NDK_VER}" "cmake;3.22.1"
+          echo "ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/${NDK_VER}" >> $GITHUB_ENV
 
-      - name: Cache SCons build artifacts
-        uses: actions/cache@v3
-        with:
-          path: |
-            godot/.sconsign.dblite
-            godot/bin/
-          key: ${{ runner.os }}-godot-android-${{ hashFiles('godot/**/*.cpp', 'godot/**/*.h', 'godot/SConstruct') }}
-          restore-keys: |
-            ${{ runner.os }}-godot-android-
-
-      - name: Build Android Export Templates (Release & Debug)
+      - name: Build Android Export Templates (arm32 + arm64, Release & Debug)
         run: |
           cd godot
-          # بناء نسخة الـ Release لـ arm64 (الأكثر شيوعاً للهواتف الحديثة)
-          echo "Building Android arm64 Release template..."
-          scons platform=android target=template_release arch=arm64 -j2
-          
-          # بناء نسخة الـ Debug لـ arm64
-          echo "Building Android arm64 Debug template..."
-          scons platform=android target=template_debug arch=arm64 -j2
-          
-          # ملاحظة: إذا أردت دعم x86_64 للمحاكيات، يجب تكرار الأوامر مع تغيير arch=x86_64
-          cd ..
-
-      - name: Generate Android AAR Library
-        run: |
-          cd godot/platform/android/java
-          ./gradlew generateGodotTemplates
-          cd ../../../
+          # --- 32-bit (armeabi-v7a) ---
+          scons platform=android target=template_release arch=arm32 -j$(nproc)
+          scons platform=android target=template_debug   arch=arm32 -j$(nproc)
+          # --- 64-bit (arm64-v8a) ---
+          scons platform=android target=template_release arch=arm64 -j$(nproc)
+          # آخر أمر مع generate_android_binaries=yes يجمع كل المعماريات في APK/AAR واحد
+          scons platform=android target=template_debug   arch=arm64 -j$(nproc) generate_android_binaries=yes
+          ls -la bin/
 
       - name: Package Android Templates
         run: |
-          mkdir -p android_export_templates
-          # نقل ملفات الـ AAR والـ APK الناتجة
-          cp godot/bin/*.apk android_export_templates/ 2>/dev/null || true
-          cp godot/bin/*.aar android_export_templates/ 2>/dev/null || true
-          
-          cat > android_export_templates/README.txt << 'EOF'
-          Android Export Templates for Godot
-          ==================================
-          Built with AES-256 encryption.
-          Architectures: arm64-v8a
-          
-          To use:
-          1. Copy the .aar files to your project's 'android/build/libs' if using custom builds.
-          2. Or install through the Godot Editor 'Install from file' menu.
-          EOF
-          
-          (cd android_export_templates && zip -9 -r ../android_export_templates.zip .)
+          # اسم الإصدار بصيغة version.txt مثل 4.4.1.stable
+          VER=$(echo "$GODOT_TAG" | sed 's/-/./')
+          mkdir -p tpz/templates
+          cp godot/bin/android_release.apk godot/bin/android_debug.apk godot/bin/android_source.zip tpz/templates/
+          echo "$VER" > tpz/templates/version.txt
+          (cd tpz && zip -9 -r ../android_export_templates.tpz templates)
 
       - name: Upload Android templates artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-export-templates
-          path: android_export_templates.zip
+          path: |
+            android_export_templates.tpz
+            godot/bin/android_*.apk
+            godot/bin/android_source.zip
