@@ -52,6 +52,109 @@ jobs:
       - name: Run AES-256 secure script
         run: |
           python3 aes_secure.py ./godot
+      - name: Apply custom branding (replace default Godot icons)
+        run: |
+          if [ -f branding/logo.png ]; then
+            sudo apt-get install -y python3-pil python3-numpy
+            cat << 'PYEOF' > make_branding.py
+          #!/usr/bin/env python3
+          """Generate Android launcher/splash branding from ONE logo image and drop it
+          into a Godot source tree (replaces the default Godot icons)."""
+          import os, sys
+          import numpy as np
+          from PIL import Image, ImageFilter
+
+          godot, logo_path = sys.argv[1], sys.argv[2]
+          RES = os.path.join(godot, "platform/android/java/lib/src/main/res")
+          MAIN = os.path.join(godot, "main")
+
+          src = Image.open(logo_path).convert("RGB")
+          W, H = src.size
+          a = np.asarray(src).astype(np.float32)
+
+          # --- 1) cut the glyph out of the dark background (luminance key) -----------
+          BG = (1, 6, 22)                      # background layer colour (matches logo bg)
+          mx = a.max(axis=2)
+          alpha = np.clip((mx - 90.0) / (150.0 - 90.0), 0, 1)
+          alpha = alpha * alpha * (3 - 2 * alpha)                      # smoothstep
+          # ignore the rounded frame + side glow: keep only the inner glyph area
+          m = np.zeros_like(alpha)
+          x0, x1, y0, y1 = int(.17 * W), int(.865 * W), int(.092 * H), int(.82 * H)
+          m[y0:y1, x0:x1] = 1
+          alpha *= m
+          # drop isolated specks (opening, then generous dilation to keep soft edges)
+          core = Image.fromarray(((alpha > 0.5) * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(9))
+          alpha *= (np.asarray(core) > 0)
+          rgb = np.where(alpha[..., None] > 0.02, a / np.maximum(alpha[..., None], 0.02), 0)
+          rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+          glyph = Image.fromarray(np.dstack([rgb, (alpha * 255).astype(np.uint8)]), "RGBA")
+          bbox = glyph.getchannel("A").point(lambda v: 255 if v > 40 else 0).getbbox()
+          glyph = glyph.crop(bbox)
+          gw, gh = glyph.size
+
+          # --- 2) scale so the glyph fits the adaptive-icon safe zone ----------------
+          # 432px canvas, visible circle radius 144px, keep everything within ~134px
+          al = np.asarray(glyph.getchannel("A")) > 90
+          ys, xs = np.nonzero(al)
+          cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+          rmax = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2).max()
+          scale = 134.0 / rmax
+          FG = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
+          g = glyph.resize((max(1, round(gw * scale)), max(1, round(gh * scale))), Image.LANCZOS)
+          FG.alpha_composite(g, (round(216 - cx * scale), round(216 - cy * scale)))
+          BGI = Image.new("RGBA", (432, 432), BG + (255,))
+          # monochrome (alpha only is used by Android) - solid silhouette
+          ma = FG.getchannel("A").filter(ImageFilter.MaxFilter(3)).point(lambda v: min(255, int(v * 2.2)))
+          MONO = Image.merge("RGBA", (Image.new("L", FG.size, 255),) * 3 + (ma,))
+          # legacy full-colour icon = the whole logo
+          MAIN_ICON = src.convert("RGBA")
+
+          def save(img, path, size, lossless=True):
+              d = os.path.dirname(path)
+              if not os.path.isdir(d):
+                  print("::warning::missing dir", d); return
+              img.resize((size, size), Image.LANCZOS).save(path, "WEBP", lossless=lossless, quality=100, method=6)
+              print("wrote", os.path.relpath(path, godot), size)
+
+          DPI = {"mipmap-mdpi": (48, 108), "mipmap-hdpi": (72, 162), "mipmap-xhdpi": (96, 216),
+                 "mipmap-xxhdpi": (144, 324), "mipmap-xxxhdpi": (192, 432), "mipmap": (192, 108)}
+          for d, (legacy, ad) in DPI.items():
+              p = os.path.join(RES, d)
+              save(MAIN_ICON, f"{p}/icon.webp", legacy)
+              save(FG, f"{p}/icon_foreground.webp", ad)
+              save(BGI, f"{p}/icon_background.webp", ad)
+              save(MONO, f"{p}/icon_monochrome.webp", ad)
+          save(FG, os.path.join(RES, "drawable/splash_icon.webp"), 432)
+
+          # --- 3) engine default boot splash (800x600) + window icon -----------------
+          if os.path.isdir(MAIN):
+              sp = Image.new("RGBA", (800, 600), (0, 0, 0, 0))
+              logo = MAIN_ICON.resize((380, 380), Image.LANCZOS)
+              sp.alpha_composite(logo, (210, 110))
+              sp.save(os.path.join(MAIN, "splash.png"))
+              MAIN_ICON.resize((128, 128), Image.LANCZOS).save(os.path.join(MAIN, "app_icon.png"))
+              print("wrote main/splash.png, main/app_icon.png")
+
+          # previews (optional) -------------------------------------------------------
+          if len(sys.argv) > 3:
+              from PIL import ImageDraw
+              out = sys.argv[3]; os.makedirs(out, exist_ok=True)
+              comp = Image.alpha_composite(BGI, FG)
+              def mask(shape):
+                  v = comp.crop((54, 54, 378, 378)); mm = Image.new("L", v.size, 0); dd = ImageDraw.Draw(mm)
+                  (dd.ellipse((0, 0, v.width - 1, v.height - 1), fill=255) if shape == "circle"
+                   else dd.rounded_rectangle((0, 0, v.width - 1, v.height - 1), 70, fill=255))
+                  o = Image.new("RGBA", v.size, (40, 40, 44, 255)); o.paste(v, (0, 0), mm); return o
+              sheet = Image.new("RGBA", (324 * 3 + 80, 340), (40, 40, 44, 255))
+              sheet.paste(mask("circle"), (20, 8)); sheet.paste(mask("round"), (364, 8))
+              sheet.paste(MAIN_ICON.resize((324, 324)), (708, 8)); sheet.convert("RGB").save(f"{out}/preview.png")
+
+          PYEOF
+            python3 -I make_branding.py ./godot branding/logo.png
+          else
+            echo "::warning::branding/logo.png not found - default Godot icons kept"
+          fi
+
       - name: Install Dependencies & Compilers
         run: |
           sudo apt-get update
